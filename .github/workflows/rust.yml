@@ -6,12 +6,16 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  ENV RUSTFLAGS: "-Dwarnings"
+  ENV RUSTDOCFLAGS: "-Dwarnings"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+    - name: Install dependencies
+      run: rustup target add thumbv7em-none-eabihf
     - name: Lint
       run: |
         cargo fmt --check
