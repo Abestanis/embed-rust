@@ -11,7 +11,7 @@ fn git_example() {
     assert!(utils::contains(GIT_SIMPLE_EXAMPLE, b"compiler-artifact"));
 
     const GIT_COMPLEX_EXAMPLE: &[u8] = embed_rust!({
-        git: { url: "https://github.com/Abestanis/embed-rust.git", path: "tests/git/project", branch: "feature/git" }
+        git: { url: "https://github.com/Abestanis/embed-rust.git", path: "tests/git/project", branch: "main" }
     });
     assert_ne!(GIT_SIMPLE_EXAMPLE, GIT_COMPLEX_EXAMPLE);
     assert!(!GIT_COMPLEX_EXAMPLE.is_empty());
