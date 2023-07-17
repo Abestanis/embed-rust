@@ -28,9 +28,63 @@ struct CompilerArtifactMessage {
     filenames: Vec<String>,
 }
 
+macro_rules! parse_options {
+    ($input: expr, $key: ident, $args: ident, $argument_parser: block) => {
+        parse_options!($input, $key, $args, $argument_parser, {}, false);
+    };
+    ($input: expr, $key: ident, $args: ident, $argument_parser: block, $string_argument_parser: block) => {
+        parse_options!($input, $key, $args, $argument_parser, $string_argument_parser, true);
+    };
+    ($input: expr, $key: ident, $args: ident, $argument_parser: block, $string_argument_parser: block, $allow_string_arguments: expr) => {
+        let mut seen_arguments = HashSet::new();
+        let $args;
+        let _: Brace = braced!($args in $input);
+        while !$args.is_empty() {
+            let lookahead = $args.lookahead1();
+            if lookahead.peek(Ident) {
+                let $key: Ident = $args.parse()?;
+                let _colon: syn::token::Colon = $args.parse()?;
+                if !seen_arguments.insert($key.to_string()) {
+                    return Err(Error::new(
+                        $key.span(),
+                        format!("Duplicated parameter `{}`", $key),
+                    ));
+                }
+                $argument_parser;
+            } else if $allow_string_arguments && lookahead.peek(LitStr) {
+                #[allow(unused_variables)]
+                let $key: LitStr = $args.parse()?;
+                let _colon: syn::token::Colon = $args.parse()?;
+                $string_argument_parser;
+            } else {
+                return Err(lookahead.error());
+            }
+            let lookahead = $args.lookahead1();
+            if lookahead.peek(Comma) {
+                let _: Comma = $args.parse()?;
+            } else if !$args.is_empty() {
+                return Err(lookahead.error());
+            }
+        }
+    };
+}
+
+#[derive(Debug)]
+struct GitSource {
+    url: String,
+    branch: Option<String>,
+    path: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+enum Source {
+    Inline(Group),
+    Git(GitSource),
+}
+
 /// Arguments for the [embed_rust] macro.
 struct MatchTelecommandArgs {
-    source: Group,
+    source: Source,
     extra_files: HashMap<PathBuf, String>,
     dependencies: String,
 }
@@ -40,46 +94,86 @@ impl syn::parse::Parse for MatchTelecommandArgs {
         let mut source = None;
         let mut extra_files = HashMap::new();
         let mut dependencies = String::new();
-        let mut seen_arguments = HashSet::new();
-        let args;
-        let _: Brace = braced!(args in input);
-        while !args.is_empty() {
-            let lookahead = args.lookahead1();
-            if lookahead.peek(Ident) {
-                let key: Ident = args.parse()?;
-                let _colon: syn::token::Colon = args.parse()?;
-                if !seen_arguments.insert(key.to_string()) {
-                    return Err(Error::new(
-                        key.span(),
-                        format!("Duplicated parameter `{key}`"),
-                    ));
-                }
+        parse_options!(
+            input,
+            key,
+            args,
+            {
                 match key.to_string().as_str() {
                     "source" => {
                         if source.is_some() {
                             return Err(Error::new(
                                 key.span(),
-                                format!("Can only have one of `{key}` and `\"src/main.rs\"`"),
+                                format!(
+                                    "Can only have one of `{key}`, `git` and `\"src/main.rs\"`"
+                                ),
                             ));
                         }
-                        source = Some(args.parse()?)
+                        source = Some(Source::Inline(args.parse()?))
                     }
                     "dependencies" => {
-                        if !dependencies.is_empty() {
-                            return Err(Error::new(
-                                key.span(),
-                                format!("Can only have one `{key}` argument"),
-                            ));
-                        }
                         let dependencies_string: LitStr = args.parse()?;
                         dependencies = dependencies_string.value();
                     }
+                    "git" => {
+                        if source.is_some() {
+                            return Err(Error::new(
+                                key.span(),
+                                format!(
+                                    "Can only have one of source`, `{key}` and `\"src/main.rs\"`"
+                                ),
+                            ));
+                        }
+                        let lookahead = args.lookahead1();
+                        source = Some(Source::Git(if lookahead.peek(LitStr) {
+                            let url: LitStr = args.parse()?;
+                            GitSource {
+                                url: url.value(),
+                                branch: None,
+                                path: None,
+                            }
+                        } else if lookahead.peek(Brace) {
+                            let mut url = None;
+                            let mut branch = None;
+                            let mut path = None;
+                            parse_options!(args, key, git_args, {
+                                match key.to_string().as_str() {
+                                    "url" => {
+                                        let url_literal: LitStr = git_args.parse()?;
+                                        url = Some(url_literal.value());
+                                    }
+                                    "branch" => {
+                                        let branch_literal: LitStr = git_args.parse()?;
+                                        branch = Some(branch_literal.value());
+                                    }
+                                    "path" => {
+                                        let path_literal: LitStr = git_args.parse()?;
+                                        path = Some(PathBuf::from_slash(path_literal.value()));
+                                    }
+                                    _ => {
+                                        return Err(Error::new(
+                                            key.span(),
+                                            format!("Invalid parameter `{key}`"),
+                                        ))
+                                    }
+                                }
+                            });
+                            let Some(url) = url else {
+                                return Err(Error::new(
+                                    key.span(),
+                                    format!("missing `url` key for `{key}` argument"),
+                                ));
+                            };
+                            GitSource { url, branch, path }
+                        } else {
+                            return Err(lookahead.error());
+                        }))
+                    }
                     _ => return Err(Error::new(key.span(), format!("Invalid parameter `{key}`"))),
                 }
-            } else if lookahead.peek(LitStr) {
-                let key: LitStr = args.parse()?;
+            },
+            {
                 let key_value = key.value();
-                let _colon: syn::token::Colon = args.parse()?;
                 let path = PathBuf::from_slash(key_value.clone());
                 let extra_file_slot = match extra_files.entry(path) {
                     Entry::Vacant(entry) => entry,
@@ -95,10 +189,12 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                         if source.is_some() {
                             return Err(Error::new(
                                 key.span(),
-                                format!("Can only have one of `source` and `\"{key_value}\"`"),
+                                format!(
+                                    "Can only have one of `source`, `git` and `\"{key_value}\"`"
+                                ),
                             ));
                         }
-                        source = Some(args.parse()?)
+                        source = Some(Source::Inline(args.parse()?))
                     }
                     _ => {
                         let content = if key_value.ends_with(".rs") {
@@ -121,16 +217,8 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                         extra_file_slot.insert(content);
                     }
                 }
-            } else {
-                return Err(lookahead.error());
             }
-            let lookahead = args.lookahead1();
-            if lookahead.peek(Comma) {
-                let _: Comma = args.parse()?;
-            } else if !args.is_empty() {
-                return Err(lookahead.error());
-            }
-        }
+        );
         let Some(source) = source else {
             return Err(Error::new(Span::call_site(), "Missing `source` attribute"));
         };
@@ -176,7 +264,7 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     let line = call_site_location.line;
     let column = call_site_location.column;
     let id = format!("{source_file_id}_{line}_{column}");
-    let generated_project_dir =
+    let mut generated_project_dir =
         PathBuf::from(env::var("OUT_DIR").expect("'OUT_DIR' environment variable is missing"))
             .join(id);
     let _ = fs::remove_dir_all(generated_project_dir.clone()); // Ignore errors about non-existent directories.
@@ -186,16 +274,37 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             format!("Failed to create embedded project directory: {error:?}"),
         ));
     }
-    run_command(
-        Command::new("cargo")
-            .current_dir(generated_project_dir.clone())
-            .arg("init"),
-        "Failed to initialize embedded project crate",
-    )?;
-    let source_dir = generated_project_dir.join("src");
-    let main_source_file = source_dir.join("main.rs");
-    let main_source = args.source.stream();
-    write_file(main_source_file, quote!(#main_source).to_string())?;
+
+    match args.source {
+        Source::Inline(source) => {
+            run_command(
+                Command::new("cargo")
+                    .current_dir(generated_project_dir.clone())
+                    .arg("init"),
+                "Failed to initialize embedded project crate",
+            )?;
+            let source_dir = generated_project_dir.join("src");
+            let main_source_file = source_dir.join("main.rs");
+            let main_source = source.stream();
+            write_file(main_source_file, quote!(#main_source).to_string())?;
+        }
+        Source::Git(git_source) => {
+            let mut clone_command = Command::new("git");
+            let mut clone_command = clone_command.arg("clone").arg("--recurse-submodules");
+            if let Some(branch) = git_source.branch {
+                clone_command = clone_command.arg("--branch").arg(branch);
+            }
+            run_command(
+                clone_command
+                    .arg(git_source.url)
+                    .arg(generated_project_dir.clone()),
+                "Failed to clone embedded project",
+            )?;
+            if let Some(path) = git_source.path {
+                generated_project_dir = generated_project_dir.join(path);
+            }
+        }
+    }
     for (path, content) in args.extra_files.into_iter() {
         write_file(generated_project_dir.join(path), content)?;
     }
@@ -301,7 +410,7 @@ fn run_command(command: &mut Command, error_message: &str) -> syn::Result<Vec<u8
         }
         Err(error) => Err(Error::new(
             Span::call_site(),
-            format!("Failed to initialize embedded project crate: {error:?}"),
+            format!("{error_message}: `{command:?}` failed: {error:?}"),
         )),
     }
 }
