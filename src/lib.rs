@@ -9,6 +9,7 @@ use std::{
     process::Command,
 };
 
+use fs2::FileExt;
 use path_slash::PathBufExt;
 use proc_macro2::{Group, Span};
 use quote::quote;
@@ -267,6 +268,25 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     let mut generated_project_dir =
         PathBuf::from(env::var("OUT_DIR").expect("'OUT_DIR' environment variable is missing"))
             .join(id);
+    let mut lock_file = generated_project_dir.clone();
+    lock_file.set_extension(".lock");
+    let lock_file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_file)
+        .map_err(|error| {
+            Error::new(
+                Span::call_site(),
+                format!("Failed to open lock-file: {error:?}"),
+            )
+        })?;
+    if let Err(error) = lock_file.lock_exclusive() {
+        return Err(Error::new(
+            Span::call_site(),
+            format!("Failed to lock lock-file: {error:?}"),
+        ));
+    }
     let _ = fs::remove_dir_all(generated_project_dir.clone()); // Ignore errors about non-existent directories.
     if let Err(error) = fs::create_dir_all(generated_project_dir.clone()) {
         return Err(Error::new(
