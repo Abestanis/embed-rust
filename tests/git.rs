@@ -15,7 +15,7 @@ fn git_example() {
     });
     assert_ne!(GIT_SIMPLE_EXAMPLE, GIT_COMPLEX_EXAMPLE);
     assert!(!GIT_COMPLEX_EXAMPLE.is_empty());
-    assert!(!utils::contains(
+    assert!(utils::contains(
         GIT_COMPLEX_EXAMPLE,
         b"Hello world from git project!"
     ));
