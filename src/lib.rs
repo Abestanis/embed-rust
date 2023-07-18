@@ -310,7 +310,10 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
         }
         Source::Git(git_source) => {
             let mut clone_command = Command::new("git");
-            let mut clone_command = clone_command.arg("clone").arg("--recurse-submodules");
+            let mut clone_command = clone_command
+                .arg("clone")
+                .arg("--recurse-submodules")
+                .arg("--depth=1");
             if let Some(branch) = git_source.branch {
                 clone_command = clone_command.arg("--branch").arg(branch);
             }
