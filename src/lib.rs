@@ -2,7 +2,7 @@
 
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
-    env,
+    env::{self, temp_dir},
     fs::{self, File},
     io::{Read, Write},
     path::PathBuf,
@@ -265,9 +265,9 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     let line = call_site_location.line;
     let column = call_site_location.column;
     let id = format!("{source_file_id}_{line}_{column}");
-    let mut generated_project_dir =
-        PathBuf::from(env::var("OUT_DIR").expect("'OUT_DIR' environment variable is missing"))
-            .join(id);
+    let mut generated_project_dir = env::var("OUT_DIR")
+        .map_or_else(|_| temp_dir(), PathBuf::from)
+        .join(id);
     let mut lock_file = generated_project_dir.clone();
     lock_file.set_extension(".lock");
     let lock_file = File::options()
