@@ -81,6 +81,7 @@ struct GitSource {
 enum Source {
     Inline(Group),
     Git(GitSource),
+    Path(PathBuf),
 }
 
 /// Arguments for the [embed_rust] macro.
@@ -106,7 +107,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                             return Err(Error::new(
                                 key.span(),
                                 format!(
-                                    "Can only have one of `{key}`, `git` and `\"src/main.rs\"`"
+                                    "Can only have one of `{key}`, `git`, `path` and `\"src/main.rs\"`"
                                 ),
                             ));
                         }
@@ -121,7 +122,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                             return Err(Error::new(
                                 key.span(),
                                 format!(
-                                    "Can only have one of source`, `{key}` and `\"src/main.rs\"`"
+                                    "Can only have one of `source`, `{key}`, `path` and `\"src/main.rs\"`"
                                 ),
                             ));
                         }
@@ -169,6 +170,18 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                         } else {
                             return Err(lookahead.error());
                         }))
+                    }
+                    "path" => {
+                        if source.is_some() {
+                            return Err(Error::new(
+                                key.span(),
+                                format!(
+                                    "Can only have one of `source`, `git`, `{key}` and `\"src/main.rs\"`"
+                                ),
+                            ));
+                        }
+                        let path_literal: LitStr = args.parse()?;
+                        source = Some(Source::Path(PathBuf::from_slash(path_literal.value())));
                     }
                     _ => return Err(Error::new(key.span(), format!("Invalid parameter `{key}`"))),
                 }
@@ -247,27 +260,7 @@ pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     .into()
 }
 
-fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
-    let call_site = Span::call_site().unwrap();
-    let call_site_location = call_site.start();
-    let source_file = call_site.source_file().path();
-    let crate_dir = PathBuf::from(
-        env::var("CARGO_MANIFEST_DIR")
-            .expect("'CARGO_MANIFEST_DIR' environment variable is missing"),
-    );
-    let source_file = match source_file.strip_prefix(crate_dir) {
-        Ok(path) => path.to_path_buf(),
-        Err(_) => source_file,
-    };
-    let source_file_id =
-        sanitize_filename::sanitize(source_file.to_string_lossy()).replace('.', "_");
-
-    let line = call_site_location.line;
-    let column = call_site_location.column;
-    let id = format!("{source_file_id}_{line}_{column}");
-    let mut generated_project_dir = env::var("OUT_DIR")
-        .map_or_else(|_| temp_dir(), PathBuf::from)
-        .join(id);
+fn lock_and_clear_directory(generated_project_dir: PathBuf) -> syn::Result<File> {
     let mut lock_file = generated_project_dir.clone();
     lock_file.set_extension(".lock");
     let lock_file = File::options()
@@ -288,50 +281,24 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
         ));
     }
     let _ = fs::remove_dir_all(generated_project_dir.clone()); // Ignore errors about non-existent directories.
-    if let Err(error) = fs::create_dir_all(generated_project_dir.clone()) {
+    if let Err(error) = fs::create_dir_all(generated_project_dir) {
         return Err(Error::new(
             Span::call_site(),
             format!("Failed to create embedded project directory: {error:?}"),
         ));
     }
+    Ok(lock_file)
+}
 
-    match args.source {
-        Source::Inline(source) => {
-            run_command(
-                Command::new("cargo")
-                    .current_dir(generated_project_dir.clone())
-                    .arg("init"),
-                "Failed to initialize embedded project crate",
-            )?;
-            let source_dir = generated_project_dir.join("src");
-            let main_source_file = source_dir.join("main.rs");
-            let main_source = source.stream();
-            write_file(main_source_file, quote!(#main_source).to_string())?;
-        }
-        Source::Git(git_source) => {
-            let mut clone_command = Command::new("git");
-            let mut clone_command = clone_command
-                .arg("clone")
-                .arg("--recurse-submodules")
-                .arg("--depth=1");
-            if let Some(branch) = git_source.branch {
-                clone_command = clone_command.arg("--branch").arg(branch);
-            }
-            run_command(
-                clone_command
-                    .arg(git_source.url)
-                    .arg(generated_project_dir.clone()),
-                "Failed to clone embedded project",
-            )?;
-            if let Some(path) = git_source.path {
-                generated_project_dir = generated_project_dir.join(path);
-            }
-        }
-    }
-    for (path, content) in args.extra_files.into_iter() {
+fn fill_project_template(
+    generated_project_dir: PathBuf,
+    extra_files: HashMap<PathBuf, String>,
+    dependencies: String,
+) -> syn::Result<()> {
+    for (path, content) in extra_files.into_iter() {
         write_file(generated_project_dir.join(path), content)?;
     }
-    if !args.dependencies.is_empty() {
+    if !dependencies.is_empty() {
         let cargo_file = generated_project_dir.join("Cargo.toml");
         let mut cargo_content = String::new();
         File::open(cargo_file.clone())
@@ -356,10 +323,99 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
         }
         cargo_content = cargo_content.replace(
             CARGO_DEPENDENCIES_SECTION,
-            (CARGO_DEPENDENCIES_SECTION.to_owned() + "\n" + &args.dependencies).as_str(),
+            (CARGO_DEPENDENCIES_SECTION.to_owned() + "\n" + &dependencies).as_str(),
         );
         write_file(cargo_file, cargo_content)?;
     }
+    Ok(())
+}
+
+fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
+    let call_site = Span::call_site().unwrap();
+    let call_site_location = call_site.start();
+    let source_file = call_site.source_file().path();
+    if !source_file.exists() {
+        return Err(Error::new(
+            Span::call_site(),
+            "Unable to get path of source file",
+        ));
+    }
+    let crate_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR")
+            .expect("'CARGO_MANIFEST_DIR' environment variable is missing"),
+    );
+    let source_file = match source_file.strip_prefix(crate_dir) {
+        Ok(path) => path.to_path_buf(),
+        Err(_) => source_file,
+    };
+    let source_file_id =
+        sanitize_filename::sanitize(source_file.to_string_lossy()).replace('.', "_");
+
+    let line = call_site_location.line;
+    let column = call_site_location.column;
+    let id = format!("{source_file_id}_{line}_{column}");
+    let mut generated_project_dir = env::var("OUT_DIR")
+        .map_or_else(|_| temp_dir(), PathBuf::from)
+        .join(id);
+
+    let lock_file = match args.source {
+        Source::Inline(source) => {
+            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
+            run_command(
+                Command::new("cargo")
+                    .current_dir(generated_project_dir.clone())
+                    .arg("init"),
+                "Failed to initialize embedded project crate",
+            )?;
+            let source_dir = generated_project_dir.join("src");
+            let main_source_file = source_dir.join("main.rs");
+            let main_source = source.stream();
+            write_file(main_source_file, quote!(#main_source).to_string())?;
+            fill_project_template(
+                generated_project_dir.clone(),
+                args.extra_files,
+                args.dependencies,
+            )?;
+            Some(lock_file)
+        }
+        Source::Git(git_source) => {
+            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
+            let mut clone_command = Command::new("git");
+            let mut clone_command = clone_command
+                .arg("clone")
+                .arg("--recurse-submodules")
+                .arg("--depth=1");
+            if let Some(branch) = git_source.branch {
+                clone_command = clone_command.arg("--branch").arg(branch);
+            }
+            run_command(
+                clone_command
+                    .arg(git_source.url)
+                    .arg(generated_project_dir.clone()),
+                "Failed to clone embedded project",
+            )?;
+            if let Some(path) = git_source.path {
+                generated_project_dir = generated_project_dir.join(path);
+            }
+            fill_project_template(
+                generated_project_dir.clone(),
+                args.extra_files,
+                args.dependencies,
+            )?;
+            Some(lock_file)
+        }
+        Source::Path(path) => {
+            generated_project_dir = if path.is_absolute() {
+                path
+            } else {
+                source_file
+                    .parent()
+                    .expect("Should be able to resolve the parent directory of the source file")
+                    .join(path)
+            };
+            None
+        }
+    };
 
     let mut build_command = Command::new("cargo");
     let build_command = build_command
@@ -410,6 +466,7 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             "Invalid cargo artifact message: No artifact path",
         ));
     };
+    drop(lock_file);
 
     Ok(PathBuf::from(artifact_path))
 }
