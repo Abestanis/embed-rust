@@ -15,9 +15,10 @@ use proc_macro2::{Group, Span};
 use quote::quote;
 use serde::Deserialize;
 use syn::{
-    braced,
-    token::{Brace, Comma},
-    Error, Ident, LitStr,
+    braced, bracketed,
+    punctuated::Punctuated,
+    token::{Brace, Bracket, Comma},
+    Error, Ident, LitStr, Token,
 };
 
 const CARGO_DEPENDENCIES_SECTION: &str = "[dependencies]";
@@ -84,11 +85,28 @@ enum Source {
     Path(PathBuf),
 }
 
+enum CommandItem {
+    Raw(String),
+    InputPath,
+    OutputPath,
+}
+
+impl CommandItem {
+    fn to_string<'a>(&'a self, input: &'a String, output: &'a String) -> &'a String {
+        match self {
+            CommandItem::Raw(string) => string,
+            CommandItem::InputPath => input,
+            CommandItem::OutputPath => output,
+        }
+    }
+}
+
 /// Arguments for the [embed_rust] macro.
 struct MatchTelecommandArgs {
     source: Source,
     extra_files: HashMap<PathBuf, String>,
     dependencies: String,
+    post_build_commands: Vec<Vec<CommandItem>>,
 }
 
 impl syn::parse::Parse for MatchTelecommandArgs {
@@ -96,6 +114,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
         let mut source = None;
         let mut extra_files = HashMap::new();
         let mut dependencies = String::new();
+        let mut post_build_commands = Vec::new();
         parse_options!(
             input,
             key,
@@ -183,6 +202,53 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                         let path_literal: LitStr = args.parse()?;
                         source = Some(Source::Path(PathBuf::from_slash(path_literal.value())));
                     }
+                    "post_build" => {
+                        if !post_build_commands.is_empty() {
+                            return Err(Error::new(
+                                key.span(),
+                                format!("Can only have one `{key}`"),
+                            ));
+                        }
+                        let commands;
+                        let _: Bracket = bracketed!(commands in args);
+                        post_build_commands = commands
+                            .parse_terminated(
+                                |command| {
+                                    let command_items;
+                                    let _: Bracket = bracketed!(command_items in command);
+                                    Ok(Punctuated::<_, Token![,]>::parse_separated_nonempty_with(
+                                        &command_items,
+                                        |command_item| {
+                                            let lookahead = command_item.lookahead1();
+                                            if lookahead.peek(LitStr) {
+                                                let item: LitStr = command_item.parse()?;
+                                                Ok(CommandItem::Raw(item.value()))
+                                            } else if lookahead.peek(Ident) {
+                                                let item: Ident = command_item.parse()?;
+                                                match item.to_string().as_str() {
+                                                    "input_path" => Ok(CommandItem::InputPath),
+                                                    "output_path" => Ok(CommandItem::OutputPath),
+                                                    _ => Err(Error::new(
+                                                        item.span(),
+                                                        format!(
+                                                            "Invalid command expansion variable `{item}`, only `input_path` and `output_path` are valid",
+                                                            item = item.to_string().as_str(),
+                                                        ),
+                                                    )),
+                                                }
+                                            } else {
+                                                Err(lookahead.error())
+                                            }
+                                        },
+                                    )?
+                                    .into_iter()
+                                    .collect())
+                                },
+                                Token![,],
+                            )?
+                            .into_iter()
+                            .collect();
+                    }
                     _ => return Err(Error::new(key.span(), format!("Invalid parameter `{key}`"))),
                 }
             },
@@ -240,6 +306,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
             source,
             extra_files,
             dependencies,
+            post_build_commands,
         })
     }
 }
@@ -460,12 +527,34 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             "Invalid cargo artifact message: Wrong reason",
         ));
     }
-    let Some(artifact_path) = artifact_message.filenames.first() else {
+    let Some(mut artifact_path) = artifact_message.filenames.first() else {
         return Err(Error::new(
             Span::call_site(),
             "Invalid cargo artifact message: No artifact path",
         ));
     };
+    let output_artifact_path = &(artifact_path.to_owned() + ".tmp");
+    let mut used_output_path = false;
+    for command_items in args.post_build_commands {
+        let (mut shell, first_arg) = if cfg!(target_os = "windows") {
+            (Command::new("powershell"), "/C")
+        } else {
+            (Command::new("sh"), "-c")
+        };
+        let command = shell.arg(first_arg).arg(
+            command_items
+                .iter()
+                .map(|item| item.to_string(artifact_path, output_artifact_path))
+                .fold(String::new(), |left, right| left + " " + right),
+        );
+        run_command(command, "Failed to run post_build command")?;
+        used_output_path |= command_items
+            .iter()
+            .any(|item| matches!(item, CommandItem::OutputPath));
+    }
+    if used_output_path {
+        artifact_path = output_artifact_path;
+    }
     drop(lock_file);
 
     Ok(PathBuf::from(artifact_path))
