@@ -11,7 +11,7 @@ fn executes_post_build() {
             }
         },
         post_build: [
-            ["cp", input_path, output_path] // Just copy the generated binary to the output path
+            ["cp", input_path, output_path] // Just copy the generated binary to the output path.
         ]
     });
     assert!(!BASIC_EXAMPLE.is_empty());
