@@ -411,12 +411,14 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
         env::var("CARGO_MANIFEST_DIR")
             .expect("'CARGO_MANIFEST_DIR' environment variable is missing"),
     );
-    let source_file = match source_file.strip_prefix(crate_dir) {
-        Ok(path) => path.to_path_buf(),
-        Err(_) => source_file,
-    };
-    let source_file_id =
-        sanitize_filename::sanitize(source_file.to_string_lossy()).replace('.', "_");
+
+    let source_file_id = sanitize_filename::sanitize(
+        source_file
+            .strip_prefix(&crate_dir)
+            .unwrap_or(&source_file)
+            .to_string_lossy(),
+    )
+    .replace('.', "_");
 
     let line = call_site_location.line;
     let column = call_site_location.column;
@@ -475,10 +477,38 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             generated_project_dir = if path.is_absolute() {
                 path
             } else {
-                source_file
+                // Cargo publish copies the source files into a new directory, which can break relative paths.
+                // Attempt to recover the original source code path.
+                let Ok(crate_name) = std::env::var("CARGO_PKG_NAME") else {
+                    return Err(Error::new(
+                        Span::call_site(),
+                        "Unable to get crate name",
+                    ));
+                };
+                let Ok(crate_version) = std::env::var("CARGO_PKG_VERSION") else {
+                    return Err(Error::new(
+                        Span::call_site(),
+                        "Unable to get crate version",
+                    ));
+                };
+                let cargo_publish_path = PathBuf::from("target")
+                    .join("package")
+                    .join(format!("{crate_name}-{crate_version}"));
+                let source_dir = source_file
                     .parent()
-                    .expect("Should be able to resolve the parent directory of the source file")
-                    .join(path)
+                    .expect("Should be able to resolve the parent directory of the source file");
+                let base_path = if crate_dir.ends_with(&cargo_publish_path) {
+                    let relative_source_path =
+                    source_dir.strip_prefix(&crate_dir).unwrap_or(source_dir);
+                    let mut base_path = crate_dir.as_path();
+                    for _ in cargo_publish_path.iter() {
+                        base_path = base_path.parent().expect("Should be able to remove path parts after checking that a path ends with them");
+                    }
+                    base_path.join(relative_source_path)
+                } else {
+                    source_dir.to_path_buf()
+                };
+                base_path.join(path)
             };
             None
         }
@@ -486,10 +516,13 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
 
     let mut build_command = Command::new("cargo");
     let build_command = build_command
-        .current_dir(generated_project_dir)
+        .current_dir(&generated_project_dir)
         .arg("build")
         .arg("--release");
-    run_command(build_command, "Failed to build embedded project crate")?;
+    run_command(
+        build_command,
+        format!("Failed to build embedded project crate at {generated_project_dir:?}").as_str(),
+    )?;
 
     // Find binary.
     let output = run_command(
