@@ -499,7 +499,7 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
                     .expect("Should be able to resolve the parent directory of the source file");
                 let base_path = if crate_dir.ends_with(&cargo_publish_path) {
                     let relative_source_path =
-                    source_dir.strip_prefix(&crate_dir).unwrap_or(source_dir);
+                        source_dir.strip_prefix(&crate_dir).unwrap_or(source_dir);
                     let mut base_path = crate_dir.as_path();
                     for _ in cargo_publish_path.iter() {
                         base_path = base_path.parent().expect("Should be able to remove path parts after checking that a path ends with them");
