@@ -5,7 +5,7 @@ use std::{
     env::{self, temp_dir},
     fs::{self, File},
     io::{Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -103,7 +103,7 @@ impl CommandItem {
 
 /// Arguments for the [embed_rust] macro.
 struct MatchTelecommandArgs {
-    source: Source,
+    sources: Vec<Source>,
     extra_files: HashMap<PathBuf, String>,
     dependencies: String,
     post_build_commands: Vec<Vec<CommandItem>>,
@@ -111,7 +111,7 @@ struct MatchTelecommandArgs {
 
 impl syn::parse::Parse for MatchTelecommandArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut source = None;
+        let mut sources = Vec::new();
         let mut extra_files = HashMap::new();
         let mut dependencies = String::new();
         let mut post_build_commands = Vec::new();
@@ -121,32 +121,14 @@ impl syn::parse::Parse for MatchTelecommandArgs {
             args,
             {
                 match key.to_string().as_str() {
-                    "source" => {
-                        if source.is_some() {
-                            return Err(Error::new(
-                                key.span(),
-                                format!(
-                                    "Can only have one of `{key}`, `git`, `path` and `\"src/main.rs\"`"
-                                ),
-                            ));
-                        }
-                        source = Some(Source::Inline(args.parse()?))
-                    }
+                    "source" => sources.push(Source::Inline(args.parse()?)),
                     "dependencies" => {
                         let dependencies_string: LitStr = args.parse()?;
                         dependencies = dependencies_string.value();
                     }
                     "git" => {
-                        if source.is_some() {
-                            return Err(Error::new(
-                                key.span(),
-                                format!(
-                                    "Can only have one of `source`, `{key}`, `path` and `\"src/main.rs\"`"
-                                ),
-                            ));
-                        }
                         let lookahead = args.lookahead1();
-                        source = Some(Source::Git(if lookahead.peek(LitStr) {
+                        sources.push(Source::Git(if lookahead.peek(LitStr) {
                             let url: LitStr = args.parse()?;
                             GitSource {
                                 url: url.value(),
@@ -191,16 +173,8 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                         }))
                     }
                     "path" => {
-                        if source.is_some() {
-                            return Err(Error::new(
-                                key.span(),
-                                format!(
-                                    "Can only have one of `source`, `git`, `{key}` and `\"src/main.rs\"`"
-                                ),
-                            ));
-                        }
                         let path_literal: LitStr = args.parse()?;
-                        source = Some(Source::Path(PathBuf::from_slash(path_literal.value())));
+                        sources.push(Source::Path(PathBuf::from_slash(path_literal.value())));
                     }
                     "post_build" => {
                         if !post_build_commands.is_empty() {
@@ -265,17 +239,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                     }
                 };
                 match key_value.as_str() {
-                    "src/main.rs" => {
-                        if source.is_some() {
-                            return Err(Error::new(
-                                key.span(),
-                                format!(
-                                    "Can only have one of `source`, `git` and `\"{key_value}\"`"
-                                ),
-                            ));
-                        }
-                        source = Some(Source::Inline(args.parse()?))
-                    }
+                    "src/main.rs" => sources.push(Source::Inline(args.parse()?)),
                     _ => {
                         let content = if key_value.ends_with(".rs") {
                             let source: Group = args.parse()?;
@@ -299,11 +263,11 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                 }
             }
         );
-        let Some(source) = source else {
+        if sources.is_empty() {
             return Err(Error::new(Span::call_site(), "Missing `source` attribute"));
         };
         Ok(Self {
-            source,
+            sources,
             extra_files,
             dependencies,
             post_build_commands,
@@ -327,8 +291,8 @@ pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     .into()
 }
 
-fn lock_and_clear_directory(generated_project_dir: PathBuf) -> syn::Result<File> {
-    let mut lock_file = generated_project_dir.clone();
+fn lock_and_clear_directory(generated_project_dir: &Path) -> syn::Result<File> {
+    let mut lock_file = generated_project_dir.to_path_buf();
     lock_file.set_extension(".lock");
     let lock_file = File::options()
         .read(true)
@@ -358,11 +322,11 @@ fn lock_and_clear_directory(generated_project_dir: PathBuf) -> syn::Result<File>
 }
 
 fn fill_project_template(
-    generated_project_dir: PathBuf,
-    extra_files: HashMap<PathBuf, String>,
-    dependencies: String,
+    generated_project_dir: &Path,
+    extra_files: &HashMap<PathBuf, String>,
+    dependencies: &String,
 ) -> syn::Result<()> {
-    for (path, content) in extra_files.into_iter() {
+    for (path, content) in extra_files.iter() {
         write_file(generated_project_dir.join(path), content)?;
     }
     if !dependencies.is_empty() {
@@ -390,11 +354,110 @@ fn fill_project_template(
         }
         cargo_content = cargo_content.replace(
             CARGO_DEPENDENCIES_SECTION,
-            (CARGO_DEPENDENCIES_SECTION.to_owned() + "\n" + &dependencies).as_str(),
+            (CARGO_DEPENDENCIES_SECTION.to_owned() + "\n" + dependencies).as_str(),
         );
-        write_file(cargo_file, cargo_content)?;
+        write_file(cargo_file, &cargo_content)?;
     }
     Ok(())
+}
+
+fn prepare_source(
+    source: &Source,
+    generated_project_dir: &Path,
+    source_file: &Path,
+    crate_dir: &Path,
+    args: &MatchTelecommandArgs,
+) -> syn::Result<(Option<File>, PathBuf)> {
+    Ok(match source {
+        Source::Inline(source) => {
+            let lock_file = lock_and_clear_directory(generated_project_dir)?;
+            run_command(
+                Command::new("cargo")
+                    .current_dir(generated_project_dir.clone())
+                    .arg("init"),
+                "Failed to initialize embedded project crate",
+            )?;
+            let source_dir = generated_project_dir.join("src");
+            let main_source_file = source_dir.join("main.rs");
+            let main_source = source.stream();
+            write_file(main_source_file, &quote!(#main_source).to_string())?;
+            fill_project_template(generated_project_dir, &args.extra_files, &args.dependencies)?;
+            (Some(lock_file), generated_project_dir.to_path_buf())
+        }
+        Source::Git(git_source) => {
+            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
+            let mut clone_command = Command::new("git");
+            let mut clone_command = clone_command
+                .arg("clone")
+                .arg("--recurse-submodules")
+                .arg("--depth=1");
+            if let Some(ref branch) = git_source.branch {
+                clone_command = clone_command.arg("--branch").arg(branch);
+            }
+            run_command(
+                clone_command
+                    .arg(&git_source.url)
+                    .arg(generated_project_dir.clone()),
+                "Failed to clone embedded project",
+            )?;
+            let generated_project_dir = if let Some(ref path) = git_source.path {
+                generated_project_dir.join(path.clone())
+            } else {
+                generated_project_dir.to_path_buf()
+            };
+            fill_project_template(
+                &generated_project_dir,
+                &args.extra_files,
+                &args.dependencies,
+            )?;
+            (Some(lock_file), generated_project_dir)
+        }
+        Source::Path(path) => {
+            let generated_project_dir = if path.is_absolute() {
+                path.clone()
+            } else {
+                // Cargo publish copies the source files into a new directory, which can break relative paths.
+                // Attempt to recover the original source code path.
+                let Ok(crate_name) = std::env::var("CARGO_PKG_NAME") else {
+                    return Err(Error::new(
+                        Span::call_site(),
+                        "Unable to get crate name",
+                    ));
+                };
+                let Ok(crate_version) = std::env::var("CARGO_PKG_VERSION") else {
+                    return Err(Error::new(
+                        Span::call_site(),
+                        "Unable to get crate version",
+                    ));
+                };
+                let cargo_publish_path = PathBuf::from("target")
+                    .join("package")
+                    .join(format!("{crate_name}-{crate_version}"));
+                let source_dir = source_file
+                    .parent()
+                    .expect("Should be able to resolve the parent directory of the source file");
+                let base_path = if crate_dir.ends_with(&cargo_publish_path) {
+                    let relative_source_path =
+                        source_dir.strip_prefix(crate_dir).unwrap_or(source_dir);
+                    let mut base_path = crate_dir;
+                    for _ in cargo_publish_path.iter() {
+                        base_path = base_path.parent().expect("Should be able to remove path parts after checking that a path ends with them");
+                    }
+                    base_path.join(relative_source_path)
+                } else {
+                    source_dir.to_path_buf()
+                };
+                base_path.join(path)
+            };
+            if !generated_project_dir.exists() {
+                return Err(Error::new(
+                    Span::call_site(),
+                    format!("Given path does not exist: {path:?}"),
+                ));
+            }
+            (None, generated_project_dir)
+        }
+    })
 }
 
 fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
@@ -427,91 +490,26 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
         .map_or_else(|_| temp_dir(), PathBuf::from)
         .join(id);
 
-    let lock_file = match args.source {
-        Source::Inline(source) => {
-            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
-            run_command(
-                Command::new("cargo")
-                    .current_dir(generated_project_dir.clone())
-                    .arg("init"),
-                "Failed to initialize embedded project crate",
-            )?;
-            let source_dir = generated_project_dir.join("src");
-            let main_source_file = source_dir.join("main.rs");
-            let main_source = source.stream();
-            write_file(main_source_file, quote!(#main_source).to_string())?;
-            fill_project_template(
-                generated_project_dir.clone(),
-                args.extra_files,
-                args.dependencies,
-            )?;
-            Some(lock_file)
-        }
-        Source::Git(git_source) => {
-            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
-            let mut clone_command = Command::new("git");
-            let mut clone_command = clone_command
-                .arg("clone")
-                .arg("--recurse-submodules")
-                .arg("--depth=1");
-            if let Some(branch) = git_source.branch {
-                clone_command = clone_command.arg("--branch").arg(branch);
+    let mut i = 0;
+    let lock_file = loop {
+        match prepare_source(
+            &args.sources[i],
+            &generated_project_dir,
+            &source_file,
+            &crate_dir,
+            &args,
+        ) {
+            Ok((lock_file, new_generated_project_dir)) => {
+                generated_project_dir = new_generated_project_dir;
+                break lock_file;
             }
-            run_command(
-                clone_command
-                    .arg(git_source.url)
-                    .arg(generated_project_dir.clone()),
-                "Failed to clone embedded project",
-            )?;
-            if let Some(path) = git_source.path {
-                generated_project_dir = generated_project_dir.join(path);
+            Err(error) => {
+                if i + 1 == args.sources.len() {
+                    return Err(error);
+                }
             }
-            fill_project_template(
-                generated_project_dir.clone(),
-                args.extra_files,
-                args.dependencies,
-            )?;
-            Some(lock_file)
         }
-        Source::Path(path) => {
-            generated_project_dir = if path.is_absolute() {
-                path
-            } else {
-                // Cargo publish copies the source files into a new directory, which can break relative paths.
-                // Attempt to recover the original source code path.
-                let Ok(crate_name) = std::env::var("CARGO_PKG_NAME") else {
-                    return Err(Error::new(
-                        Span::call_site(),
-                        "Unable to get crate name",
-                    ));
-                };
-                let Ok(crate_version) = std::env::var("CARGO_PKG_VERSION") else {
-                    return Err(Error::new(
-                        Span::call_site(),
-                        "Unable to get crate version",
-                    ));
-                };
-                let cargo_publish_path = PathBuf::from("target")
-                    .join("package")
-                    .join(format!("{crate_name}-{crate_version}"));
-                let source_dir = source_file
-                    .parent()
-                    .expect("Should be able to resolve the parent directory of the source file");
-                let base_path = if crate_dir.ends_with(&cargo_publish_path) {
-                    let relative_source_path =
-                        source_dir.strip_prefix(&crate_dir).unwrap_or(source_dir);
-                    let mut base_path = crate_dir.as_path();
-                    for _ in cargo_publish_path.iter() {
-                        base_path = base_path.parent().expect("Should be able to remove path parts after checking that a path ends with them");
-                    }
-                    base_path.join(relative_source_path)
-                } else {
-                    source_dir.to_path_buf()
-                };
-                base_path.join(path)
-            };
-            None
-        }
+        i += 1;
     };
 
     let mut build_command = Command::new("cargo");
@@ -617,7 +615,7 @@ fn run_command(command: &mut Command, error_message: &str) -> syn::Result<Vec<u8
     }
 }
 
-fn write_file(path: PathBuf, content: String) -> syn::Result<()> {
+fn write_file(path: PathBuf, content: &String) -> syn::Result<()> {
     if let Some(parent_dir) = path.parent() {
         if let Err(error) = fs::create_dir_all(parent_dir) {
             return Err(Error::new(
