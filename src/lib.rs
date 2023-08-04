@@ -365,7 +365,6 @@ fn prepare_source(
     source: &Source,
     generated_project_dir: &Path,
     source_file: &Path,
-    crate_dir: &Path,
     args: &MatchTelecommandArgs,
 ) -> syn::Result<(Option<File>, PathBuf)> {
     Ok(match source {
@@ -416,38 +415,10 @@ fn prepare_source(
             let generated_project_dir = if path.is_absolute() {
                 path.clone()
             } else {
-                // Cargo publish copies the source files into a new directory, which can break relative paths.
-                // Attempt to recover the original source code path.
-                let Ok(crate_name) = std::env::var("CARGO_PKG_NAME") else {
-                    return Err(Error::new(
-                        Span::call_site(),
-                        "Unable to get crate name",
-                    ));
-                };
-                let Ok(crate_version) = std::env::var("CARGO_PKG_VERSION") else {
-                    return Err(Error::new(
-                        Span::call_site(),
-                        "Unable to get crate version",
-                    ));
-                };
-                let cargo_publish_path = PathBuf::from("target")
-                    .join("package")
-                    .join(format!("{crate_name}-{crate_version}"));
-                let source_dir = source_file
+                source_file
                     .parent()
-                    .expect("Should be able to resolve the parent directory of the source file");
-                let base_path = if crate_dir.ends_with(&cargo_publish_path) {
-                    let relative_source_path =
-                        source_dir.strip_prefix(crate_dir).unwrap_or(source_dir);
-                    let mut base_path = crate_dir;
-                    for _ in cargo_publish_path.iter() {
-                        base_path = base_path.parent().expect("Should be able to remove path parts after checking that a path ends with them");
-                    }
-                    base_path.join(relative_source_path)
-                } else {
-                    source_dir.to_path_buf()
-                };
-                base_path.join(path)
+                    .expect("Should be able to resolve the parent directory of the source file")
+                    .join(path)
             };
             if !generated_project_dir.exists() {
                 return Err(Error::new(
@@ -496,7 +467,6 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             &args.sources[i],
             &generated_project_dir,
             &source_file,
-            &crate_dir,
             &args,
         ) {
             Ok((lock_file, new_generated_project_dir)) => {
