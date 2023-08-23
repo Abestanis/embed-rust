@@ -482,6 +482,9 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
             }
             Err(error) => {
                 if i + 1 == args.sources.len() {
+                    if let Some(compiled_binary_path) = args.binary_cache_path {
+                        return Ok(compiled_binary_path);
+                    }
                     return Err(error);
                 }
             }
