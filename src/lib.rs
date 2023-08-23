@@ -107,6 +107,7 @@ struct MatchTelecommandArgs {
     extra_files: HashMap<PathBuf, String>,
     dependencies: String,
     post_build_commands: Vec<Vec<CommandItem>>,
+    binary_cache_path: Option<PathBuf>,
 }
 
 impl syn::parse::Parse for MatchTelecommandArgs {
@@ -115,6 +116,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
         let mut extra_files = HashMap::new();
         let mut dependencies = String::new();
         let mut post_build_commands = Vec::new();
+        let mut binary_cache_path = None;
         parse_options!(
             input,
             key,
@@ -223,6 +225,10 @@ impl syn::parse::Parse for MatchTelecommandArgs {
                             .into_iter()
                             .collect();
                     }
+                    "binary_cache_path" => {
+                        let path_literal: LitStr = args.parse()?;
+                        binary_cache_path = Some(PathBuf::from_slash(path_literal.value()));
+                    }
                     _ => return Err(Error::new(key.span(), format!("Invalid parameter `{key}`"))),
                 }
             },
@@ -271,6 +277,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
             extra_files,
             dependencies,
             post_build_commands,
+            binary_cache_path,
         })
     }
 }
@@ -364,7 +371,7 @@ fn fill_project_template(
 fn prepare_source(
     source: &Source,
     generated_project_dir: &Path,
-    source_file: &Path,
+    source_file_dir: &Path,
     args: &MatchTelecommandArgs,
 ) -> syn::Result<(Option<File>, PathBuf)> {
     Ok(match source {
@@ -415,10 +422,7 @@ fn prepare_source(
             let generated_project_dir = if path.is_absolute() {
                 path.clone()
             } else {
-                source_file
-                    .parent()
-                    .expect("Should be able to resolve the parent directory of the source file")
-                    .join(path)
+                source_file_dir.join(path)
             };
             if !generated_project_dir.exists() {
                 return Err(Error::new(
@@ -460,13 +464,16 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     let mut generated_project_dir = env::var("OUT_DIR")
         .map_or_else(|_| temp_dir(), PathBuf::from)
         .join(id);
+    let source_file_dir = source_file
+        .parent()
+        .expect("Should be able to resolve the parent directory of the source file");
 
     let mut i = 0;
     let lock_file = loop {
         match prepare_source(
             &args.sources[i],
             &generated_project_dir,
-            &source_file,
+            source_file_dir,
             &args,
         ) {
             Ok((lock_file, new_generated_project_dir)) => {
@@ -556,9 +563,32 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     if used_output_path {
         artifact_path = output_artifact_path;
     }
+    let artifact_path = PathBuf::from(artifact_path);
+    let artifact_path = if let Some(binary_cache_path) = args.binary_cache_path {
+        let absolute_binary_cache_path = source_file_dir.join(&binary_cache_path);
+        if let Some(parent) = absolute_binary_cache_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::new(
+                    Span::call_site(),
+                    format!("Failed to create directories for binary_cache_path at {parent:?}: {error:?}"),
+                )
+            })?;
+        }
+        fs::copy(artifact_path, &absolute_binary_cache_path).map_err(|error| {
+            Error::new(
+                Span::call_site(),
+                format!(
+                    "Failed to copy generated binary to binary_cache_path at {absolute_binary_cache_path:?}: {error:?}"
+                ),
+            )
+        })?;
+        binary_cache_path
+    } else {
+        artifact_path
+    };
     drop(lock_file);
 
-    Ok(PathBuf::from(artifact_path))
+    Ok(artifact_path)
 }
 
 fn run_command(command: &mut Command, error_message: &str) -> syn::Result<Vec<u8>> {
