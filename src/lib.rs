@@ -290,7 +290,12 @@ pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
         Err(error) => return error.into_compile_error().into(),
     };
     let Some(path) = path.to_str() else {
-        return Error::new(Span::call_site(), "Generated binary path contains invalid UTF-8").into_compile_error().into();
+        return Error::new(
+            Span::call_site(),
+            "Generated binary path contains invalid UTF-8",
+        )
+        .into_compile_error()
+        .into();
     };
     quote! {
         include_bytes!(#path)
@@ -318,7 +323,7 @@ fn lock_and_clear_directory(generated_project_dir: &Path) -> syn::Result<File> {
             format!("Failed to lock lock-file: {error:?}"),
         ));
     }
-    let _ = fs::remove_dir_all(generated_project_dir.clone()); // Ignore errors about non-existent directories.
+    let _ = fs::remove_dir_all(generated_project_dir); // Ignore errors about non-existent directories.
     if let Err(error) = fs::create_dir_all(generated_project_dir) {
         return Err(Error::new(
             Span::call_site(),
@@ -379,7 +384,7 @@ fn prepare_source(
             let lock_file = lock_and_clear_directory(generated_project_dir)?;
             run_command(
                 Command::new("cargo")
-                    .current_dir(generated_project_dir.clone())
+                    .current_dir(generated_project_dir)
                     .arg("init"),
                 "Failed to initialize embedded project crate",
             )?;
@@ -391,7 +396,7 @@ fn prepare_source(
             (Some(lock_file), generated_project_dir.to_path_buf())
         }
         Source::Git(git_source) => {
-            let lock_file = lock_and_clear_directory(generated_project_dir.clone())?;
+            let lock_file = lock_and_clear_directory(generated_project_dir)?;
             let mut clone_command = Command::new("git");
             let mut clone_command = clone_command
                 .arg("clone")
@@ -403,7 +408,7 @@ fn prepare_source(
             run_command(
                 clone_command
                     .arg(&git_source.url)
-                    .arg(generated_project_dir.clone()),
+                    .arg(generated_project_dir),
                 "Failed to clone embedded project",
             )?;
             let generated_project_dir = if let Some(ref path) = git_source.path {
@@ -458,8 +463,8 @@ fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
     )
     .replace('.', "_");
 
-    let line = call_site_location.line;
-    let column = call_site_location.column;
+    let line = call_site_location.line();
+    let column = call_site_location.column();
     let id = format!("{source_file_id}_{line}_{column}");
     let mut generated_project_dir = env::var("OUT_DIR")
         .map_or_else(|_| temp_dir(), PathBuf::from)
