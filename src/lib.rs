@@ -101,8 +101,8 @@ impl CommandItem {
     }
 }
 
-/// Arguments for the [embed_rust] macro.
-struct MatchTelecommandArgs {
+/// Arguments for the [`embed_rust`] macro.
+struct MatchEmbedRustArgs {
     sources: Vec<Source>,
     extra_files: HashMap<PathBuf, String>,
     dependencies: String,
@@ -110,7 +110,7 @@ struct MatchTelecommandArgs {
     binary_cache_path: Option<PathBuf>,
 }
 
-impl syn::parse::Parse for MatchTelecommandArgs {
+impl syn::parse::Parse for MatchEmbedRustArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut sources = Vec::new();
         let mut extra_files = HashMap::new();
@@ -284,7 +284,7 @@ impl syn::parse::Parse for MatchTelecommandArgs {
 
 #[proc_macro]
 pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let args = syn::parse_macro_input!(tokens as MatchTelecommandArgs);
+    let args = syn::parse_macro_input!(tokens as MatchEmbedRustArgs);
     let path = match compile_rust(args) {
         Ok(path) => path,
         Err(error) => return error.into_compile_error().into(),
@@ -377,7 +377,7 @@ fn prepare_source(
     source: &Source,
     generated_project_dir: &Path,
     source_file_dir: &Path,
-    args: &MatchTelecommandArgs,
+    args: &MatchEmbedRustArgs,
 ) -> syn::Result<(Option<File>, PathBuf)> {
     Ok(match source {
         Source::Inline(source) => {
@@ -440,7 +440,7 @@ fn prepare_source(
     })
 }
 
-fn compile_rust(args: MatchTelecommandArgs) -> syn::Result<PathBuf> {
+fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
     let call_site = Span::call_site().unwrap();
     let call_site_location = call_site.start();
     let source_file = call_site.source_file().path();
