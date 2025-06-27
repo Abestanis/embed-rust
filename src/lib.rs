@@ -331,6 +331,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///   - `source`:
 ///     Inline source to compile.
 ///     ```rust
+///     # use embed_rust::embed_rust;
 ///     const BINARY: &[u8] = embed_rust!({
 ///         source: {
 ///             fn main() {
@@ -343,7 +344,8 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///     Absolute or relative path to a directory that contains a Rust project to compile.
 ///     Relative paths will be resolved from the parent directory of the current file.
 ///     ```rust
-///     const BINARY: &[u8] = embed_rust!({path: "projects/relative-path"});
+///     # use embed_rust::embed_rust;
+///     const BINARY: &[u8] = embed_rust!({path: "../tests/projects/relative-path"});
 ///     ```
 ///   - `git`:
 ///     Configuration for a git repository to clone that contains the Rust project to compile.
@@ -355,6 +357,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///       If omitted to root of the repository is used.
 ///       The `branch` is optional and specifies the branch to check out, otherwise the default branch is used.
 ///       ```rust
+///       # use embed_rust::embed_rust;
 ///       const BINARY: &[u8] = embed_rust!({
 ///           git: { url: "https://github.com/Abestanis/embed-rust.git", path: "tests/projects/git", branch: "main" }
 ///       });
@@ -363,6 +366,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///       A string with the url of the git repository. This is the same as only specifying the `url` in the key-value parameter case.
 ///       This assumes the Rust project is at the top level of the repository and uses the default branch.
 ///       ```rust
+///       # use embed_rust::embed_rust;
 ///       const BINARY: &[u8] = embed_rust!({git: "https://github.com/Abestanis/embed-rust.git"});
 ///       ```
 ///   - `"src/main.rs"`:
@@ -371,7 +375,8 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///   A path and string literal content for any file that should be present when compiling the source.
 ///   `"<path>"` is a relative path from the root of the Rust project that is being compiled.
 ///   This can be used for example to overwrite the cargo config file to compile for a specific target:
-///   ```rust
+///   ```rust,ignore
+///   # use embed_rust::embed_rust;
 ///   const BINARY: &[u8] = embed_rust!({
 ///       source: {
 ///           // [...]
@@ -385,6 +390,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 /// * `dependencies` (optional):
 ///   Dependencies of the Rust code as if they had been written in a `Cargo.toml` file.
 ///   ```rust
+///   # use embed_rust::embed_rust;
 ///   const BINARY: &[u8] = embed_rust!({
 ///       source: {
 ///           use clap::command;
@@ -402,13 +408,14 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///   Relative paths will be resolved from the parent directory of the current file.
 ///   If no path is provided a temporary path will be used.
 ///   ```rust
+///   # use embed_rust::embed_rust;
 ///   const BINARY: &[u8] = embed_rust!({
 ///       source: {
 ///           fn main() {
 ///               println!("Hello world!");
 ///           }
 ///       },
-///       binary_cache_path: "binaries/relative-path.bin",
+///       binary_cache_path: "../tests/binaries/relative-path.bin",
 ///   });
 ///   ```
 /// * `post_build` (optional):
@@ -420,6 +427,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
 ///   If the `output_path` is present in the command the file at the path will be used as the compiled binary
 ///   for subsequent commands and it's contents will be returned by the macro instead of the original compiled binary.
 ///   ```rust
+///   # use embed_rust::embed_rust;
 ///   const BINARY: &[u8] = embed_rust!({
 ///       source: {
 ///           fn main() {
