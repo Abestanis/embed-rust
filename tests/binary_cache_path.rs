@@ -8,7 +8,7 @@ fn binary_cache_example() {
         path: "projects/relative-path",
         binary_cache_path: "binaries/relative-path.bin",
     });
-    assert!(!BINARY_PATH_SIMPLE_EXAMPLE.is_empty());
+    const _: () = assert!(!BINARY_PATH_SIMPLE_EXAMPLE.is_empty());
     assert!(utils::contains(
         BINARY_PATH_SIMPLE_EXAMPLE,
         b"Hello world from relative path project!"

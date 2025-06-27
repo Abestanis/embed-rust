@@ -1,24 +1,58 @@
-#![feature(proc_macro_span)]
+//! A macro that allows to embed a Rust executable in another Rust program.
+
+#![deny(unused_crate_dependencies)]
+#![warn(unused_qualifications)]
+#![warn(trivial_numeric_casts)]
+#![warn(unreachable_pub)]
+#![warn(unused_results)]
+#![warn(macro_use_extern_crate)]
+#![warn(noop_method_call)]
+#![warn(single_use_lifetimes)]
+#![warn(unused_lifetimes)]
+#![warn(unused_macro_rules)]
+#![warn(variant_size_differences)]
+#![warn(clippy::cast_lossless)]
+#![warn(clippy::unused_async)]
+#![warn(clippy::ref_as_ptr)]
+#![warn(clippy::manual_c_str_literals)]
+#![warn(clippy::redundant_test_prefix)]
+#![warn(clippy::ignore_without_reason)]
+#![warn(clippy::doc_comment_double_space_linebreaks)]
+#![warn(clippy::unnecessary_debug_formatting)]
+#![warn(clippy::elidable_lifetime_names)]
+#![warn(clippy::single_option_map)]
+#![warn(clippy::manual_midpoint)]
+#![warn(clippy::unnecessary_semicolon)]
+#![warn(clippy::return_and_then)]
+#![warn(clippy::precedence_bits)]
+#![warn(clippy::as_pointer_underscore)]
+#![warn(clippy::literal_string_with_formatting_args)]
+#![warn(clippy::unnecessary_literal_bound)]
+#![warn(clippy::map_with_unused_argument_over_ranges)]
+#![warn(clippy::used_underscore_items)]
+#![warn(clippy::manual_is_power_of_two)]
+#![warn(clippy::non_zero_suggestions)]
+#![warn(clippy::unused_trait_names)]
+#![warn(missing_docs)]
 
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     env::{self, temp_dir},
     fs::{self, File},
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::Command,
 };
 
-use fs2::FileExt;
-use path_slash::PathBufExt;
+use fs2::FileExt as _;
+use path_slash::PathBufExt as _;
 use proc_macro2::{Group, Span};
 use quote::quote;
 use serde::Deserialize;
 use syn::{
-    braced, bracketed,
+    Error, Ident, LitStr, Token, braced, bracketed,
     punctuated::Punctuated,
     token::{Brace, Bracket, Comma},
-    Error, Ident, LitStr, Token,
 };
 
 const CARGO_DEPENDENCIES_SECTION: &str = "[dependencies]";
@@ -159,7 +193,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
                                         return Err(Error::new(
                                             key.span(),
                                             format!("Invalid parameter `{key}`"),
-                                        ))
+                                        ));
                                     }
                                 }
                             });
@@ -241,7 +275,7 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
                         return Err(Error::new(
                             key.span(),
                             format!("Duplicated file `{key_value}`"),
-                        ))
+                        ));
                     }
                 };
                 match key_value.as_str() {
@@ -264,14 +298,14 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
                                 return Err(lookahead.error());
                             }
                         };
-                        extra_file_slot.insert(content);
+                        let _content: &String = extra_file_slot.insert(content);
                     }
                 }
             }
         );
         if sources.is_empty() {
             return Err(Error::new(Span::call_site(), "Missing `source` attribute"));
-        };
+        }
         Ok(Self {
             sources,
             extra_files,
@@ -282,6 +316,121 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
     }
 }
 
+/// Compile Rust code and return the bytes of the compiled binary.
+///
+/// # Arguments
+/// The macro accepts arguments using a `{key: value}` syntax.
+/// To following arguments are supported:
+///
+/// * `source` / `path` / `git` / `"src/main.rs"` (one of them is required):
+///   These define the source of the Rust code that should be compiled.
+///   There can be more than one source, in which case the first existing source will be selected.
+///   `source` and `"src/main.rs"` always exist, but `path` will be skipped if the path does not point
+///   to an existing directory and `git` will be skipped if cloning the repository fails.
+///
+///   - `source`:
+///     Inline source to compile.
+///     ```rust
+///     const BINARY: &[u8] = embed_rust!({
+///         source: {
+///             fn main() {
+///                 println!("Hello world!");
+///             }
+///         },
+///     });
+///     ```
+///   - `path`:
+///     Absolute or relative path to a directory that contains a Rust project to compile.
+///     Relative paths will be resolved from the parent directory of the current file.
+///     ```rust
+///     const BINARY: &[u8] = embed_rust!({path: "projects/relative-path"});
+///     ```
+///   - `git`:
+///     Configuration for a git repository to clone that contains the Rust project to compile.
+///     This parameter accepts one of two forms of values:
+///     + Key-value parameters:
+///       A key-value map of options.
+///       The `url` provides the url of the repository and is required.
+///       The `path` is optional and specifies a subpath in the repository where the Rust project to compile can be found.
+///       If omitted to root of the repository is used.
+///       The `branch` is optional and specifies the branch to check out, otherwise the default branch is used.
+///       ```rust
+///       const BINARY: &[u8] = embed_rust!({
+///           git: { url: "https://github.com/Abestanis/embed-rust.git", path: "tests/projects/git", branch: "main" }
+///       });
+///       ```
+///     + `"<url>"`:
+///       A string with the url of the git repository. This is the same as only specifying the `url` in the key-value parameter case.
+///       This assumes the Rust project is at the top level of the repository and uses the default branch.
+///       ```rust
+///       const BINARY: &[u8] = embed_rust!({git: "https://github.com/Abestanis/embed-rust.git"});
+///       ```
+///   - `"src/main.rs"`:
+///     A string literal with the Rust source to compile (see the argument `"<path>"` below).
+/// * `"<path>"` (optional):
+///   A path and string literal content for any file that should be present when compiling the source.
+///   `"<path>"` is a relative path from the root of the Rust project that is being compiled.
+///   This can be used for example to overwrite the cargo config file to compile for a specific target:
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           // [...]
+///       },
+///       ".cargo/config.toml": r#"
+///           [build]
+///           target = "thumbv7em-none-eabihf"
+///       "#,
+///   });
+///   ```
+/// * `dependencies` (optional):
+///   Dependencies of the Rust code as if they had been written in a `Cargo.toml` file.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           use clap::command;
+///           fn main() {
+///               let _matches = command!().get_matches();
+///           }
+///       },
+///       dependencies: r#"
+///            clap = { version = "~4.5", features = ["cargo"] }
+///        "#
+///   });
+///   ```
+/// * `binary_cache_path` (optional):
+///   The absolute or relative path to which the compiled rust binary is written to.
+///   Relative paths will be resolved from the parent directory of the current file.
+///   If no path is provided a temporary path will be used.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           fn main() {
+///               println!("Hello world!");
+///           }
+///       },
+///       binary_cache_path: "binaries/relative-path.bin",
+///   });
+///   ```
+/// * `post_build` (optional):
+///   A list of commands that will be executed after the binary has been build.
+///   Each command is a list where the first element is the command and all other elements are arguments.
+///   The arguments must be string literals except or the special symbols `input_path` or `output_path`.
+///   `input_path` will be replaced with the path to the compiled binary and `output_path` will be a
+///   path to a temporary file which can be used as an output path for the command.
+///   If the `output_path` is present in the command the file at the path will be used as the compiled binary
+///   for subsequent commands and it's contents will be returned by the macro instead of the original compiled binary.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           fn main() {
+///               println!("Hello world!");
+///           }
+///       },
+///       post_build: [
+///           ["cp", input_path, output_path] // Useless example, just copy the generated binary to the output path.
+///       ]
+///   });
+///   ```
 #[proc_macro]
 pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let args = syn::parse_macro_input!(tokens as MatchEmbedRustArgs);
@@ -305,11 +454,12 @@ pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
 fn lock_and_clear_directory(generated_project_dir: &Path) -> syn::Result<File> {
     let mut lock_file = generated_project_dir.to_path_buf();
-    lock_file.set_extension(".lock");
+    let _did_have_name: bool = lock_file.set_extension(".lock");
     let lock_file = File::options()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(lock_file)
         .map_err(|error| {
             Error::new(
@@ -336,7 +486,7 @@ fn lock_and_clear_directory(generated_project_dir: &Path) -> syn::Result<File> {
 fn fill_project_template(
     generated_project_dir: &Path,
     extra_files: &HashMap<PathBuf, String>,
-    dependencies: &String,
+    dependencies: &str,
 ) -> syn::Result<()> {
     for (path, content) in extra_files.iter() {
         write_file(generated_project_dir.join(path), content)?;
@@ -344,18 +494,24 @@ fn fill_project_template(
     if !dependencies.is_empty() {
         let cargo_file = generated_project_dir.join("Cargo.toml");
         let mut cargo_content = String::new();
-        File::open(cargo_file.clone())
+        let _bytes_read: usize = File::open(cargo_file.clone())
             .map_err(|error| {
                 Error::new(
                     Span::call_site(),
-                    format!("Failed to open {cargo_file:?}: {error:?}"),
+                    format!(
+                        "Failed to open {cargo_file}: {error:?}",
+                        cargo_file = cargo_file.display()
+                    ),
                 )
             })?
             .read_to_string(&mut cargo_content)
             .map_err(|error| {
                 Error::new(
                     Span::call_site(),
-                    format!("Failed to read {cargo_file:?}: {error:?}"),
+                    format!(
+                        "Failed to read {cargo_file}: {error:?}",
+                        cargo_file = cargo_file.display()
+                    ),
                 )
             })?;
         if !cargo_content.contains(CARGO_DEPENDENCIES_SECTION) {
@@ -382,7 +538,7 @@ fn prepare_source(
     Ok(match source {
         Source::Inline(source) => {
             let lock_file = lock_and_clear_directory(generated_project_dir)?;
-            run_command(
+            let _output: Vec<u8> = run_command(
                 Command::new("cargo")
                     .current_dir(generated_project_dir)
                     .arg("init"),
@@ -405,7 +561,7 @@ fn prepare_source(
             if let Some(ref branch) = git_source.branch {
                 clone_command = clone_command.arg("--branch").arg(branch);
             }
-            run_command(
+            let _output: Vec<u8> = run_command(
                 clone_command
                     .arg(&git_source.url)
                     .arg(generated_project_dir),
@@ -432,7 +588,7 @@ fn prepare_source(
             if !generated_project_dir.exists() {
                 return Err(Error::new(
                     Span::call_site(),
-                    format!("Given path does not exist: {path:?}"),
+                    format!("Given path does not exist: {}", path.display()),
                 ));
             }
             (None, generated_project_dir)
@@ -442,12 +598,16 @@ fn prepare_source(
 
 fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
     let call_site = Span::call_site().unwrap();
-    let call_site_location = call_site.start();
-    let source_file = call_site.source_file().path();
-    if !source_file.exists() {
+    let Some(source_file) = call_site.local_file() else {
         return Err(Error::new(
             Span::call_site(),
             "Unable to get path of source file",
+        ));
+    };
+    if !source_file.exists() {
+        return Err(Error::new(
+            Span::call_site(),
+            "Unable to get path of source file (file does not exist)",
         ));
     }
     let crate_dir = PathBuf::from(
@@ -463,8 +623,8 @@ fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
     )
     .replace('.', "_");
 
-    let line = call_site_location.line();
-    let column = call_site_location.column();
+    let line = call_site.line();
+    let column = call_site.column();
     let id = format!("{source_file_id}_{line}_{column}");
     let mut generated_project_dir = env::var("OUT_DIR")
         .map_or_else(|_| temp_dir(), PathBuf::from)
@@ -502,9 +662,13 @@ fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
         .current_dir(&generated_project_dir)
         .arg("build")
         .arg("--release");
-    run_command(
+    let _output: Vec<u8> = run_command(
         build_command,
-        format!("Failed to build embedded project crate at {generated_project_dir:?}").as_str(),
+        format!(
+            "Failed to build embedded project crate at {}",
+            generated_project_dir.display()
+        )
+        .as_str(),
     )?;
 
     // Find binary.
@@ -563,7 +727,7 @@ fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
                 .map(|item| item.to_string(artifact_path, output_artifact_path))
                 .fold(String::new(), |left, right| left + " " + right),
         );
-        run_command(command, "Failed to run post_build command")?;
+        let _output: Vec<u8> = run_command(command, "Failed to run post_build command")?;
         used_output_path |= command_items
             .iter()
             .any(|item| matches!(item, CommandItem::OutputPath));
@@ -578,15 +742,19 @@ fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::new(
                     Span::call_site(),
-                    format!("Failed to create directories for binary_cache_path at {parent:?}: {error:?}"),
+                    format!(
+                        "Failed to create directories for binary_cache_path at {parent}: {error:?}",
+                        parent = parent.display()
+                    ),
                 )
             })?;
         }
-        fs::copy(artifact_path, &absolute_binary_cache_path).map_err(|error| {
+        let _bytes_copied: u64 = fs::copy(artifact_path, &absolute_binary_cache_path).map_err(|error| {
             Error::new(
                 Span::call_site(),
                 format!(
-                    "Failed to copy generated binary to binary_cache_path at {absolute_binary_cache_path:?}: {error:?}"
+                    "Failed to copy generated binary to binary_cache_path at {absolute_binary_cache_path}: {error:?}",
+                    absolute_binary_cache_path=absolute_binary_cache_path.display()
                 ),
             )
         })?;
@@ -608,8 +776,10 @@ fn run_command(command: &mut Command, error_message: &str) -> syn::Result<Vec<u8
                     format!(
                         "{error_message}: `{command:?}` failed with exit code {exit_code:?}\n# Stdout:\n{stdout}\n# Stderr:\n{stderr}",
                         exit_code = output.status.code(),
-                        stdout = core::str::from_utf8(output.stdout.as_slice()).unwrap_or("<Invalid UTF-8>"),
-                        stderr = core::str::from_utf8(output.stderr.as_slice()).unwrap_or("<Invalid UTF-8>")
+                        stdout = core::str::from_utf8(output.stdout.as_slice())
+                            .unwrap_or("<Invalid UTF-8>"),
+                        stderr = core::str::from_utf8(output.stderr.as_slice())
+                            .unwrap_or("<Invalid UTF-8>")
                     ),
                 ))
             } else {
@@ -628,20 +798,26 @@ fn write_file(path: PathBuf, content: &String) -> syn::Result<()> {
         if let Err(error) = fs::create_dir_all(parent_dir) {
             return Err(Error::new(
                 Span::call_site(),
-                format!("Failed to create parent directory for {path:?}: {error:?}"),
+                format!(
+                    "Failed to create parent directory for {path}: {error:?}",
+                    path = path.display()
+                ),
             ));
         }
     }
     let mut file = File::create(path.clone()).map_err(|error| {
         Error::new(
             Span::call_site(),
-            format!("Failed to open {path:?}: {error:?}"),
+            format!("Failed to open {path}: {error:?}", path = path.display()),
         )
     })?;
     file.write_all(content.as_bytes()).map_err(|error| {
         Error::new(
             Span::call_site(),
-            format!("Failed to write {path:?} to project: {error:?}"),
+            format!(
+                "Failed to write {path} to project: {error:?}",
+                path = path.display()
+            ),
         )
     })?;
     Ok(())

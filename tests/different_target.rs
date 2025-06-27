@@ -61,7 +61,7 @@ fn embeds_embedded_example() {
             cortex-m-rt = "0.7.1"
         "#
     });
-    assert!(!EMBEDDED_TARGET_EXECUTABLE.is_empty());
+    const _: () = assert!(!EMBEDDED_TARGET_EXECUTABLE.is_empty());
     assert!(EMBEDDED_TARGET_EXECUTABLE.starts_with(b"\x7FELF"));
     assert!(utils::contains(
         EMBEDDED_TARGET_EXECUTABLE,
