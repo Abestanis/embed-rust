@@ -442,12 +442,16 @@ fn prepare_source(
 
 fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
     let call_site = Span::call_site().unwrap();
-    let call_site_location = call_site.start();
-    let source_file = call_site.source_file().path();
-    if !source_file.exists() {
+    let Some(source_file) = call_site.local_file() else {
         return Err(Error::new(
             Span::call_site(),
             "Unable to get path of source file",
+        ));
+    };
+    if !source_file.exists() {
+        return Err(Error::new(
+            Span::call_site(),
+            "Unable to get path of source file (file does not exist)",
         ));
     }
     let crate_dir = PathBuf::from(
@@ -459,7 +463,7 @@ fn compile_rust(args: MatchEmbedRustArgs) -> syn::Result<PathBuf> {
         source_file
             .strip_prefix(&crate_dir)
             .unwrap_or(&source_file)
-            .to_string_lossy(),
+            .to_string_l
     )
     .replace('.', "_");
 
