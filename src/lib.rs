@@ -1,4 +1,5 @@
-#![feature(proc_macro_span)]
+//! A macro that allows to embed a Rust executable in another Rust program.
+
 
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
@@ -282,6 +283,121 @@ impl syn::parse::Parse for MatchEmbedRustArgs {
     }
 }
 
+/// Compile Rust code and return the bytes of the compiled binary.
+///
+/// # Arguments
+/// The macro accepts arguments using a `{key: value}` syntax.
+/// To following arguments are supported:
+///
+/// * `source` / `path` / `git` / `"src/main.rs"` (one of them is required):
+///   These define the source of the Rust code that should be compiled.
+///   There can be more than one source, in which case the first existing source will be selected.
+///   `source` and `"src/main.rs"` always exist, but `path` will be skipped if the path does not point
+///   to an existing directory and `git` will be skipped if cloning the repository fails.
+///
+///   - `source`:
+///     Inline source to compile.
+///     ```rust
+///     const BINARY: &[u8] = embed_rust!({
+///         source: {
+///             fn main() {
+///                 println!("Hello world!");
+///             }
+///         },
+///     });
+///     ```
+///   - `path`:
+///     Absolute or relative path to a directory that contains a Rust project to compile.
+///     Relative paths will be resolved from the parent directory of the current file.
+///     ```rust
+///     const BINARY: &[u8] = embed_rust!({path: "projects/relative-path"});
+///     ```
+///   - `git`:
+///     Configuration for a git repository to clone that contains the Rust project to compile.
+///     This parameter accepts one of two forms of values:
+///     + Key-value parameters:
+///       A key-value map of options.
+///       The `url` provides the url of the repository and is required.
+///       The `path` is optional and specifies a subpath in the repository where the Rust project to compile can be found.
+///       If omitted to root of the repository is used.
+///       The `branch` is optional and specifies the branch to check out, otherwise the default branch is used.
+///       ```rust
+///       const BINARY: &[u8] = embed_rust!({
+///           git: { url: "https://github.com/Abestanis/embed-rust.git", path: "tests/projects/git", branch: "main" }
+///       });
+///       ```
+///     + `"<url>"`:
+///       A string with the url of the git repository. This is the same as only specifying the `url` in the key-value parameter case.
+///       This assumes the Rust project is at the top level of the repository and uses the default branch.
+///       ```rust
+///       const BINARY: &[u8] = embed_rust!({git: "https://github.com/Abestanis/embed-rust.git"});
+///       ```
+///   - `"src/main.rs"`:
+///     A string literal with the Rust source to compile (see the argument `"<path>"` below).
+/// * `"<path>"` (optional):
+///   A path and string literal content for any file that should be present when compiling the source.
+///   `"<path>"` is a relative path from the root of the Rust project that is being compiled.
+///   This can be used for example to overwrite the cargo config file to compile for a specific target:
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           // [...]
+///       },
+///       ".cargo/config.toml": r#"
+///           [build]
+///           target = "thumbv7em-none-eabihf"
+///       "#,
+///   });
+///   ```
+/// * `dependencies` (optional):
+///   Dependencies of the Rust code as if they had been written in a `Cargo.toml` file.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           use clap::command;
+///           fn main() {
+///               let _matches = command!().get_matches();
+///           }
+///       },
+///       dependencies: r#"
+///            clap = { version = "~4.5", features = ["cargo"] }
+///        "#
+///   });
+///   ```
+/// * `binary_cache_path` (optional):
+///   The absolute or relative path to which the compiled rust binary is written to.
+///   Relative paths will be resolved from the parent directory of the current file.
+///   If no path is provided a temporary path will be used.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           fn main() {
+///               println!("Hello world!");
+///           }
+///       },
+///       binary_cache_path: "binaries/relative-path.bin",
+///   });
+///   ```
+/// * `post_build` (optional):
+///   A list of commands that will be executed after the binary has been build.
+///   Each command is a list where the first element is the command and all other elements are arguments.
+///   The arguments must be string literals except or the special symbols `input_path` or `output_path`.
+///   `input_path` will be replaced with the path to the compiled binary and `output_path` will be a
+///   path to a temporary file which can be used as an output path for the command.
+///   If the `output_path` is present in the command the file at the path will be used as the compiled binary
+///   for subsequent commands and it's contents will be returned by the macro instead of the original compiled binary.
+///   ```rust
+///   const BINARY: &[u8] = embed_rust!({
+///       source: {
+///           fn main() {
+///               println!("Hello world!");
+///           }
+///       },
+///       post_build: [
+///           ["cp", input_path, output_path] // Useless example, just copy the generated binary to the output path.
+///       ]
+///   });
+///   ```
 #[proc_macro]
 pub fn embed_rust(tokens: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let args = syn::parse_macro_input!(tokens as MatchEmbedRustArgs);
