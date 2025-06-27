@@ -14,6 +14,6 @@ fn executes_post_build() {
             ["cp", input_path, output_path] // Just copy the generated binary to the output path.
         ]
     });
-    assert!(!BASIC_EXAMPLE.is_empty());
+    const _: () = assert!(!BASIC_EXAMPLE.is_empty());
     assert!(utils::contains(BASIC_EXAMPLE, b"Hello world!"));
 }
