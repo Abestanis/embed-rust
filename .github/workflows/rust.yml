@@ -12,12 +12,19 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust_version: ['Stable Rust', 'MSRV']
     steps:
     - uses: actions/checkout@v3
+    - name: Overwrite Rust version to MSRV
+      if: ${{ matrix.rust_version == 'MSRV' }}
+      run: echo "channel = \"$(grep -oP 'rust-version\s*=\s*"\K[0-9]+\.[0-9]+' Cargo.toml)\"" >> rust-toolchain.toml
     - name: Install dependencies
       run: |
         rustup update
         rustup target add thumbv7em-none-eabihf
+        rustc --version
     - name: Lint
       run: |
         cargo fmt --check
